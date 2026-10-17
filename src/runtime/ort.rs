@@ -13,6 +13,8 @@ fn ort_err<R>(e: ort::Error<R>) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
 }
 use ort::environment::Environment;
+use ort::ep::ExecutionProviderDispatch;
+#[cfg(feature = "ort-coreml")]
 use ort::ep::{CoreML, ExecutionProvider};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -22,7 +24,11 @@ use super::{Model, Runtime, Tensor};
 
 /// Ort-based ONNX inference runtime.
 ///
-/// Automatically tries CoreML on macOS (falls back to CPU if unavailable).
+/// `execution_providers` are registered in order when a session is built;
+/// ONNX Runtime falls back to CPU for anything they do not take. With the
+/// `ort-coreml` feature (part of `ort`) the default asks for CoreML, which is
+/// a no-op where it is unavailable; otherwise the default is CPU. For CUDA,
+/// enable `ort-cuda` and pass `ort::ep::CUDA::default().build()`.
 ///
 /// ONNX Runtime allows one environment per process. If the application has
 /// already created one with `ort::init()`, pass it in `environment`;
@@ -32,6 +38,7 @@ pub struct OrtRuntime {
     pub intra_threads: usize,
     pub profiling_path: Option<PathBuf>,
     pub environment: Option<Environment>,
+    pub execution_providers: Vec<ExecutionProviderDispatch>,
 }
 
 impl Default for OrtRuntime {
@@ -46,6 +53,10 @@ impl Default for OrtRuntime {
             intra_threads: 0,
             profiling_path: None,
             environment: None,
+            #[cfg(feature = "ort-coreml")]
+            execution_providers: vec![CoreML::default().build()],
+            #[cfg(not(feature = "ort-coreml"))]
+            execution_providers: Vec::new(),
         }
     }
 }
@@ -64,9 +75,17 @@ fn environment() -> Environment {
 }
 
 impl OrtRuntime {
-    /// Check if CoreML is available in the loaded ORT runtime.
+    /// Check if CoreML is available in the loaded ORT runtime (always `false`
+    /// without the `ort-coreml` feature).
     pub fn is_coreml_available(&self) -> bool {
-        CoreML::is_available().unwrap_or(false)
+        #[cfg(feature = "ort-coreml")]
+        {
+            CoreML::is_available().unwrap_or(false)
+        }
+        #[cfg(not(feature = "ort-coreml"))]
+        {
+            false
+        }
     }
 }
 
@@ -83,7 +102,7 @@ impl Runtime for OrtRuntime {
             .map_err(ort_err)?
             .with_intra_threads(self.intra_threads)
             .map_err(ort_err)?
-            .with_execution_providers([CoreML::default().build()])
+            .with_execution_providers(self.execution_providers.clone())
             .map_err(ort_err)?;
         if let Some(ref profile_path) = self.profiling_path {
             builder = builder.with_profiling(profile_path).map_err(ort_err)?;
